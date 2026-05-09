@@ -1,0 +1,7 @@
+interface:
+  display_name: "Integrate AccessGrid"
+  short_description: "Add AccessGrid to an existing PACS"
+  default_prompt: "Use $integrate-accessgrid to add AccessGrid provisioning and lifecycle sync to an existing PACS or credentialing codebase."
+
+policy:
+  allow_implicit_invocation: true
