@@ -1,21 +1,23 @@
-# Discovery And Planning
+# Discovery and Planning
 
-Use this file when starting work in a host PACS or credentialing repo.
+Companion to [../SKILL.md](../SKILL.md). Use during Phase 1 (read the host repo) and Phase 3 (database discovery). This file is the *checklist* of what to look for; write findings into the mapping doc the SKILL.md tells you to maintain in the host repo.
 
-## Repo Inspection Checklist
+## Repo inspection checklist
 
-Find these before coding:
+Find these in the host repo before writing any AG-specific code:
 
-- User or cardholder model
-- Credential, badge, or card model
-- Tenant, site, building, or organization model
-- Where external-provider clients live
-- Where secrets and env vars are defined
+- User / cardholder model
+- Credential / badge / card model
+- Tenant / site / building / organization model (if multi-tenant)
+- Where external-provider clients live (the `Stripe::Client` / `Twilio` / `SendGrid` pattern)
+- Where secrets and env vars are defined (and how prod/dev split works)
 - Where queues, jobs, workers, or cron processes live
-- Where webhook controllers or callback handlers live
+- Where webhook controllers / callback handlers live
 - Where admin or issuance UI lives
-- Where audit logs, activity logs, or event records live
+- Where audit logs / activity logs / event records live
 - Where integration docs or ADRs belong
+- Where ORM-level validations are written
+- Encryption-at-rest convention for sensitive columns
 
 Useful searches:
 
@@ -24,108 +26,41 @@ rg -n "webhook|callback|signature|HMAC|job|worker|queue|retry"
 rg -n "credential|badge|cardholder|site code|facility code|card number"
 rg -n "twilio|sendgrid|postmark|stripe|external api|client"
 rg -n "tenant|site|organization|building|campus"
+rg -n "encrypts|encrypted|cipher|kms|secrets_manager"
 ```
 
-## Routing Matrix
+## Required inputs from the user
 
-### Choose `simple`
+Collect or confirm before Phase 5 (secrets and client wiring):
 
-Choose this when:
+- `ACCESSGRID_ACCOUNT_ID`
+- `ACCESSGRID_SECRET_KEY`
+- Sandbox vs prod AG account split
+- Webhook endpoint URL the host will expose
+- For MVP: pre-created template IDs (iOS / Android / Samsung)
+- For MVP: webhook bearer (shown once at webhook creation in AG console)
+- Wallet art assets, or explicit approval to use placeholders during dev
 
-- Existing AccessGrid templates already exist
-- The host app only needs issue, suspend, resume, and delete
-- A manual setup step in AccessGrid is acceptable
+## AccessGrid terms to preserve
 
-Avoid this track if the product must self-serve tenant onboarding.
+Use AG's vocabulary in code and docs:
 
-### Choose `comprehensive`
+- **Access Pass** — the wallet credential product name in docs
+- **`access_cards`** / **`AccessCards`** — the SDK surface for pass lifecycle methods
+- **`console`** — the SDK surface for card templates, landing pages, webhooks, credential profiles, ledger
+- **`X-ACCT-ID`** / **`X-PAYLOAD-SIG`** — the auth headers for signed API requests
 
-Choose this when:
+Do not rename these in host-app abstractions unless the codebase already has a strong existing provider pattern.
 
-- The host app must manage templates or landing pages
-- A cloud product needs webhook-driven reconciliation
-- Multi-tenant config should live in the host app rather than in a console checklist
+## Review gate before any AG code lands
 
-### Choose `deep`
+Don't start implementation until these are explicit:
 
-Choose this when:
-
-- Credential profile automation is required
-- Secure key lifecycle is part of the product scope
-- Support and operations need auditable reissue and troubleshooting paths
-
-Do not choose this track just because the API allows it.
-
-## Required Inputs
-
-Collect or confirm:
-
-- `ACCOUNT_ID`
-- `SECRET_KEY`
-- webhook verification inputs returned or required by the active AccessGrid webhook configuration
-- AccessGrid environment or base URL if applicable
-- Existing template IDs or template strategy
-- Existing landing page IDs or landing page strategy
-- Host primary key used for the credential
-- Credential data source format
-- Wallet art assets or explicit placeholder approval
-
-## Delivery Artifacts
-
-Create these in the host repo or its existing documentation structure:
-
-1. Entity mapping document
-2. Config and secrets contract
-3. Lifecycle state map
-4. Retry and dedupe policy
-5. Verification log
-
-## AccessGrid Terms To Preserve
-
-Use the official docs vocabulary when writing integration code or docs:
-
-- `Access Pass`: the wallet credential product name in docs
-- `access_cards` or `AccessCards`: the SDK surface used for pass lifecycle methods
-- `console`: the SDK surface for card templates, landing pages, webhooks, credential profiles, and template pairs
-- `X-ACCT-ID` and `X-PAYLOAD-SIG`: auth headers for signed API requests
-
-Do not rename these concepts in the host app abstractions unless the codebase already has a strong existing provider pattern.
-
-## Mapping Document Shape
-
-Use this structure if the host repo has no preferred format:
-
-```md
-# AccessGrid Entity Mapping
-
-## Host Models
-- Cardholder:
-- Credential:
-- Tenant/Site:
-
-## Field Mapping
-| Host field | AccessGrid field | Notes |
-| --- | --- | --- |
-| credential.id | metadata.pacs_credential_id | Stable dedupe key |
-
-## Lifecycle Mapping
-| Host state/event | AccessGrid action | Notes |
-| --- | --- | --- |
-| active | provision/resume | Depends on existing AG object |
-
-## Persistence
-- Where AG object IDs are stored
-- Where dedupe keys are stored
-- Where sync errors are stored
-```
-
-## Review Gate Before Coding
-
-Do not start implementation until these are explicit:
-
-- Where the AccessGrid client will live
-- Which record stores the AccessGrid ID
+- Where the AccessGrid client object will live
+- Which host record stores `accessgrid_id`
 - Which operation triggers provisioning
-- Which operation or signal triggers suspend/resume/delete
-- Which mechanism prevents duplicate issuance
+- Which operations / signals trigger suspend / resume / unlink / delete
+- Which mechanism prevents duplicate issuance (event ID dedupe vs deterministic key)
 - Which place exposes terminal failures to operators
+- Which integration level the user committed to (Phase 2 output)
+- Which UI surface the user committed to (Phase 2 output)

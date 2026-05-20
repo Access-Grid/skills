@@ -1,82 +1,130 @@
-# Laravel PHP Patterns
+# Laravel / PHP Patterns
 
-Use this file when the host stack is Laravel or PHP.
+Use this file when the host stack is Laravel or any modern PHP framework.
 
-## Official SDK Shape
+## Install
 
-The README shows:
-
-- `new AccessGrid($accountId, $secretKey)`
-- `$client->accessCards()` for access-card lifecycle work
-- `$client->console()` for enterprise console features
-
-```php
-$client = new AccessGrid(
-    $_ENV['ACCOUNT_ID'],
-    $_ENV['SECRET_KEY'],
-);
+```bash
+composer require accessgrid/accessgrid-php
 ```
 
-The SDK should own `X-ACCT-ID` and `X-PAYLOAD-SIG` signing.
+Requires PHP 7.4 or higher.
 
-## Access Pass Provisioning
+## Client
 
 ```php
-$card = $client->accessCards()->provision([
-    'card_template_id' => '0xd3adb00b5',
-    'employee_id' => '123456789',
-    'full_name' => $credential->full_name,
-    'metadata' => [
-        'pacs_credential_id' => (string) $credential->id,
-    ],
-    'site_code' => $credential->site_code,
-    'card_number' => $credential->card_number,
-    'email' => $credential->email,
-    'phone_number' => $credential->phone_number,
-    'classification' => $credential->classification,
+use AccessGrid\Client;
+
+$client = new Client($_ENV['ACCOUNT_ID'], $_ENV['SECRET_KEY']);
+```
+
+In Laravel, bind as a singleton in a service provider:
+
+```php
+$this->app->singleton(Client::class, fn () => new Client(
+    config('services.accessgrid.account_id'),
+    config('services.accessgrid.secret_key'),
+));
+```
+
+The SDK owns `X-ACCT-ID` and `X-PAYLOAD-SIG` signing.
+
+## Provisioning
+
+```php
+$card = $client->accessCards->provision([
+    'card_template_id' => $template->accessgrid_id,
+    'employee_id'      => $credential->holder->external_id,
+    'tag_id'           => $credential->card_number,
+    'full_name'        => $credential->holder->full_name,
+    'email'            => $credential->holder->email,
+    'metadata'         => ['pacs_credential_id' => (string) $credential->id],
+]);
+
+$credential->update([
+    'accessgrid_id' => $card->id,
+    'state'         => 'created',
 ]);
 ```
 
-## Lifecycle Operations
-
-The PHP README excerpt I verified did not show suspend/resume/delete examples. Confirm exact method names in the package source or live docs before using them.
-
-## Console Resources
+## Lifecycle
 
 ```php
-$webhook = $client->console()->createWebhook([
-    'name' => 'Prod Webhook',
-    'target_url' => 'https://host.example.com/webhooks/accessgrid',
-]);
+$client->accessCards->suspend($accessgridId);
+$client->accessCards->resume($accessgridId);
+$client->accessCards->unlink($accessgridId);
+$client->accessCards->delete($accessgridId);
 ```
 
-## Webhook Handling
+Confirm method names against the installed Composer version.
 
-The PHP README excerpt I verified did not show receiver verification code. Build that from the official webhook docs.
+## Webhook receiver (Laravel)
 
 ```php
 class AccessGridWebhookController extends Controller
 {
     public function __invoke(Request $request, WebhookEventsRepository $events, CredentialsRepository $credentials)
     {
-        $event = $request->json()->all();
-        if ($events->hasProcessed($event['id'])) {
-            return response()->json(['ok' => true, 'duplicate' => true]);
+        $bearer = $request->bearerToken();
+        if (! hash_equals(config('services.accessgrid.webhook_bearer'), (string) $bearer)) {
+            abort(401);
         }
 
+        $event = $request->json()->all();
+        if (($event['specversion'] ?? null) !== '1.0' || ($event['source'] ?? null) !== 'accessgrid') {
+            abort(400);
+        }
+
+        if ($events->hasProcessed($event['id'])) {
+            return response()->json(['received' => true]);
+        }
         $events->markReceived($event['id'], $event['type']);
 
-        $credentialId = $event['data']['metadata']['pacs_credential_id'];
-        if ($event['type'] === 'credential.suspended') {
-            $credentials->markSuspendedByAccessGrid($credentialId);
-        } elseif ($event['type'] === 'credential.resumed') {
-            $credentials->markActiveByAccessGrid($credentialId);
-        } else {
-            $events->markIgnored($event['id']);
-        }
+        $accessgridId = $event['data']['access_pass_id'] ?? null;
+
+        match ($event['type']) {
+            'ag.access_pass.activated' => $credentials->setStateByAccessGridId($accessgridId, 'active'),
+            'ag.access_pass.suspended' => $credentials->setStateByAccessGridId($accessgridId, 'suspended'),
+            'ag.access_pass.resumed'   => $credentials->setStateByAccessGridId($accessgridId, 'active'),
+            'ag.access_pass.unlinked'  => $credentials->setStateByAccessGridId($accessgridId, 'unlink'),
+            'ag.access_pass.deleted'   => $credentials->setStateByAccessGridId($accessgridId, 'deleted'),
+            default => null, // Unknown types fall through.
+        };
 
         $events->markProcessed($event['id']);
-        return response()->json(['ok' => true]);
+        return response()->json(['received' => true]);
     }
 }
 ```
+
+Exclude the webhook route from CSRF in `VerifyCsrfToken::$except`. Use `hash_equals` for the bearer comparison to avoid timing attacks.
+
+See [webhook-events.md](./webhook-events.md) for the full event catalog.
+
+## Encryption-at-rest
+
+Laravel 10+ supports the `encrypted` cast natively:
+
+```php
+class Webhook extends Model
+{
+    protected $casts = ['bearer_token' => 'encrypted'];
+}
+
+class CredentialProfileKey extends Model
+{
+    protected $casts = ['key_value' => 'encrypted'];
+}
+```
+
+For non-Laravel PHP apps, use Halite (libsodium wrapper) or PHP's `sodium_*` functions with a key from your KMS.
+
+## Background jobs
+
+Use Laravel queues for provisioning to keep web requests fast:
+
+```php
+ProvisionAccessGridPassJob::dispatch($credential->id);
+```
+
+Mark the job `ShouldQueue`, configure `tries = 5`, and `backoff()` with exponential delays. Catch 4xx errors and fail the job permanently instead of retrying.

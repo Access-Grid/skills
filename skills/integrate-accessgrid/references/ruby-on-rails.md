@@ -1,79 +1,125 @@
-# Ruby On Rails Patterns
+# Ruby / Rails Patterns
 
-Use this file when the host stack is Ruby or Rails.
+Use this file when the host stack is Rails (or any Ruby app).
 
-## Official SDK Shape
+## Install
 
-The README shows:
-
-- `AccessGrid::Client.new(account_id:, secret_key:)`
-- `client.access_cards` for access-card lifecycle work
-- `client.console` for enterprise console features
-
-```rb
-client = AccessGrid::Client.new(
-  account_id: ENV.fetch("ACCOUNT_ID"),
-  secret_key: ENV.fetch("SECRET_KEY")
-)
+```ruby
+# Gemfile
+gem 'accessgrid'
 ```
 
-The SDK should own `X-ACCT-ID` and `X-PAYLOAD-SIG` signing.
-
-## Access Pass Provisioning
-
-```rb
-card = client.access_cards.provision(
-  card_template_id: "0xd3adb00b5",
-  employee_id: "123456789",
-  full_name: credential.full_name,
-  metadata: { pacs_credential_id: credential.id.to_s },
-  site_code: credential.site_code,
-  card_number: credential.card_number,
-  email: credential.email,
-  phone_number: credential.phone_number,
-  classification: credential.classification
-)
+```bash
+bundle install
+# or, outside Bundler:
+gem install accessgrid
 ```
 
-## Lifecycle Operations
+Requires Ruby 2.19 or higher.
 
-The Ruby README excerpt I verified did not show suspend/resume/delete examples. Confirm exact method names in the package source or live docs before using them.
+## Client
 
-## Console Resources
+```ruby
+require 'accessgrid'
 
-```rb
-webhook = client.console.create_webhook(
-  name: "Prod Webhook",
-  target_url: "https://host.example.com/webhooks/accessgrid"
-)
+client = AccessGrid.new(ENV.fetch('ACCOUNT_ID'), ENV.fetch('SECRET_KEY'))
 ```
 
-## Webhook Handling
+Wrap in a host-owned service object (idiomatic Rails) instead of using the raw client directly from controllers.
 
-The Ruby README excerpt I verified did not show receiver verification code. Build that from the official webhook docs.
+## Provisioning
 
-```rb
-class AccessgridWebhooksController < ApplicationController
-  skip_before_action :verify_authenticity_token
+```ruby
+card = client.access_cards.issue(
+  card_template_id: template.accessgrid_id,
+  employee_id: credential.holder.external_id,
+  tag_id: credential.card_number,
+  full_name: credential.holder.full_name,
+  email: credential.holder.email,
+  metadata: { pacs_credential_id: credential.id.to_s }
+)
 
+credential.update!(accessgrid_id: card.id, state: 'created')
+```
+
+## Lifecycle
+
+```ruby
+client.access_cards.suspend(credential.accessgrid_id)
+client.access_cards.resume(credential.accessgrid_id)
+client.access_cards.unlink(credential.accessgrid_id)
+client.access_cards.delete(credential.accessgrid_id)
+```
+
+Confirm method names against the installed gem version — README at https://github.com/Access-Grid/accessgrid-rb is authoritative.
+
+## Webhook receiver (Rails controller)
+
+```ruby
+class AccessgridWebhooksController < ActionController::API
   def create
+    bearer = request.headers['Authorization'].to_s.delete_prefix('Bearer ')
+    head :unauthorized unless ActiveSupport::SecurityUtils.secure_compare(
+      bearer, Rails.application.credentials.accessgrid_webhook_bearer
+    )
+
     event = JSON.parse(request.raw_post)
-    return head :ok if WebhookEvent.processed?(event.fetch("id"))
+    return head :bad_request unless event['specversion'] == '1.0' && event['source'] == 'accessgrid'
 
-    WebhookEvent.mark_received!(event.fetch("id"), event.fetch("type"))
-
-    pacs_credential_id = event.dig("data", "metadata", "pacs_credential_id")
-    case event.fetch("type")
-    when "credential.suspended"
-      Credential.find(pacs_credential_id).update!(status: "suspended")
-    when "credential.resumed"
-      Credential.find(pacs_credential_id).update!(status: "active")
-    else
-      WebhookEvent.mark_ignored!(event.fetch("id"))
+    if WebhookEvent.exists?(accessgrid_event_id: event['id'])
+      return render json: { received: true }
     end
 
-    WebhookEvent.mark_processed!(event.fetch("id"))
-    head :ok
+    ApplicationRecord.transaction do
+      WebhookEvent.create!(accessgrid_event_id: event['id'], event_type: event['type'])
+      apply_event(event)
+    end
+
+    render json: { received: true }
   end
+
+  private
+
+  def apply_event(event)
+    accessgrid_id = event.dig('data', 'access_pass_id')
+    case event['type']
+    when 'ag.access_pass.activated' then Credential.find_by(accessgrid_id:)&.update!(state: 'active')
+    when 'ag.access_pass.suspended' then Credential.find_by(accessgrid_id:)&.update!(state: 'suspended')
+    when 'ag.access_pass.resumed'   then Credential.find_by(accessgrid_id:)&.update!(state: 'active')
+    when 'ag.access_pass.unlinked'  then Credential.find_by(accessgrid_id:)&.update!(state: 'unlink')
+    when 'ag.access_pass.deleted'   then Credential.find_by(accessgrid_id:)&.update!(state: 'deleted')
+    # Unknown types are recorded and ignored.
+    end
+  end
+end
+```
+
+Skip CSRF for the webhook route. Use `ActiveSupport::SecurityUtils.secure_compare` to avoid timing attacks on the bearer.
+
+## Encryption-at-rest
+
+Use built-in ActiveRecord encryption (Rails 7+):
+
+```ruby
+class Webhook < ApplicationRecord
+  encrypts :bearer_token
+end
+
+class CredentialProfileKey < ApplicationRecord
+  encrypts :key_value
+end
+```
+
+Set up `bin/rails db:encryption:init` and store keys in `Rails.application.credentials`.
+
+## Background jobs
+
+Use ActiveJob for any AG call that runs in response to a user-facing request — provisioning, especially. The HTTP round-trip can exceed acceptable web-response latency.
+
+```ruby
+class ProvisionAccessgridPassJob < ApplicationJob
+  queue_as :default
+  retry_on Net::OpenTimeout, wait: :exponentially_longer, attempts: 5
+  discard_on AccessGrid::ClientError # 4xx — no point retrying
 end
 ```

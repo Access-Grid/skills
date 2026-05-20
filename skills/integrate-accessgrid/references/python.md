@@ -1,14 +1,25 @@
 # Python Patterns
 
-Use this file when the host stack is Python. This is the primary reference.
+Use this file when the host stack is Python. This is the primary reference and the source of truth that all other language SDKs mirror.
+
+## Install
+
+```bash
+pip install accessgrid
+```
+
+Requires Python 3.7+. Pin a version in `requirements.txt` / `pyproject.toml` matching the host's dependency-management convention.
 
 ## Official SDK Shape
 
 The README shows:
 
 - `AccessGrid(account_id, secret_key)` as the client constructor
-- `client.access_cards` for access-card lifecycle work
-- `client.console` for enterprise console features
+- `client.access_cards` — provision, update, list, get, suspend, resume, unlink, delete
+- `client.console` — templates, landing pages, webhooks, credential profiles, HID organizations, ledger, event logs
+- `client.console.credential_profiles` — list, create profiles
+- `client.console.webhooks` — create, list, delete webhooks
+- `client.console.hid.orgs` — create, activate, list HID organizations
 
 ## Authentication
 
@@ -148,26 +159,52 @@ Do not assume Python console webhook helpers exist unless you confirm them in th
 
 ## Webhook Handling
 
-The Python README excerpt I verified does not show webhook receiver code. Use the official docs for inbound payload format and verification, and do not infer it from other SDKs.
+Webhooks arrive as CloudEvents 1.0 payloads. See [webhook-events.md](./webhook-events.md) for the full envelope and event catalog. Receiver must:
+
+1. Verify bearer token from the `Authorization` header against the stored `webhooks.bearer_token` (or env var for MVP).
+2. Validate envelope: `payload["specversion"] == "1.0"` and `payload["source"] == "accessgrid"`.
+3. Dedupe by `payload["id"]`.
+4. Return `{"received": True}` with HTTP 200 always — even on duplicates and unknown event types.
 
 ```python
-def handle_accessgrid_webhook(request, webhook_events_repo, credentials_repo):
-    event = json.loads(request.body.decode("utf-8"))
+from flask import Flask, request, jsonify
+import os, json
+
+app = Flask(__name__)
+
+@app.route("/webhooks/accessgrid", methods=["POST"])
+def handle_accessgrid_webhook(webhook_events_repo, credentials_repo):
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or auth[7:] != os.environ["ACCESSGRID_WEBHOOK_BEARER"]:
+        return ("", 401)
+
+    event = request.get_json()
+    if event.get("specversion") != "1.0" or event.get("source") != "accessgrid":
+        return ("", 400)
+
     if webhook_events_repo.has_processed(event["id"]):
-        return {"ok": True, "duplicate": True}
+        return jsonify(received=True)
 
     webhook_events_repo.mark_received(event["id"], event["type"])
 
-    pacs_credential_id = event["data"]["metadata"]["pacs_credential_id"]
-    if event["type"] == "credential.suspended":
-        credentials_repo.mark_suspended_by_accessgrid(pacs_credential_id)
-    elif event["type"] == "credential.resumed":
-        credentials_repo.mark_active_by_accessgrid(pacs_credential_id)
-    else:
-        webhook_events_repo.mark_ignored(event["id"])
+    data = event.get("data") or {}
+    accessgrid_id = data.get("access_pass_id")
+    etype = event["type"]
+
+    if etype == "ag.access_pass.activated":
+        credentials_repo.set_state_by_accessgrid_id(accessgrid_id, "active")
+    elif etype == "ag.access_pass.suspended":
+        credentials_repo.set_state_by_accessgrid_id(accessgrid_id, "suspended")
+    elif etype == "ag.access_pass.resumed":
+        credentials_repo.set_state_by_accessgrid_id(accessgrid_id, "active")
+    elif etype == "ag.access_pass.unlinked":
+        credentials_repo.set_state_by_accessgrid_id(accessgrid_id, "unlink")
+    elif etype == "ag.access_pass.deleted":
+        credentials_repo.set_state_by_accessgrid_id(accessgrid_id, "deleted")
+    # Unknown event types fall through — still ack 200.
 
     webhook_events_repo.mark_processed(event["id"])
-    return {"ok": True}
+    return jsonify(received=True)
 ```
 
 ## Rate Limits

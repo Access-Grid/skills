@@ -1,255 +1,329 @@
 ---
 name: integrate-accessgrid
-description: Integrate AccessGrid mobile credentials into an existing PACS or credentialing codebase. Use when you need to add provisioning, lifecycle sync, card template setup, or webhook/sync-agent handling for Apple Wallet or Google Wallet credentials.
+description: Integrate AccessGrid mobile wallet credentials (Apple / Google / Samsung) into an existing software system. Use when adding issuance, lifecycle management, template management, credential profiles, landing pages, or webhook handling to a host app — at any of four integration levels (MVP, Essential, Complete, Premium).
 ---
 
 # Integrate AccessGrid
 
-Use this skill when the job is to add AccessGrid to an existing product, not to build a standalone demo. The goal is a host-app integration that fits the current architecture, maps PACS entities cleanly, and can be operated without manual cleanup.
+Adds AccessGrid to an existing product as a phased, host-fitting integration — not a standalone demo. The goal is code that lives inside the host's normal patterns (its models, queues, controllers, secrets, admin UI) at one of four well-defined scope tiers.
 
-Read only what you need:
+This skill is for **integration** into a working codebase. If the user wants a standalone proof-of-concept, that is a different job and this skill will likely over-deliver.
 
-- Read [references/discovery-and-planning.md](./references/discovery-and-planning.md) when you need the repo-inspection checklist, routing matrix, and delivery artifacts.
-- Read [references/python.md](./references/python.md) first when the host stack is Python. This is the primary reference.
-- Read [references/go.md](./references/go.md) when the host stack is Go.
-- Read [references/java.md](./references/java.md) when the host stack is Java.
-- Read [references/csharp.md](./references/csharp.md) when the host stack is C# or .NET.
-- Read [references/node-typescript.md](./references/node-typescript.md) when the host stack is Node.js or TypeScript.
-- Read [references/ruby-on-rails.md](./references/ruby-on-rails.md) when the host stack is Rails.
-- Read [references/laravel-php.md](./references/laravel-php.md) when the host stack is Laravel or PHP.
-- Run `python3 scripts/scaffold_mapping_doc.py <system-name>` when the host project needs a starter mapping document.
+## Operating rules
 
-## Operating Rules
+- **Read the host codebase first.** Do not invent its models, queues, secrets story, webhook conventions, or deployment shape. Mirror what already exists for providers like Stripe, Twilio, SendGrid.
+- **Match the host's conventions** for migration tooling, ORM, encryption-at-rest, background jobs, and admin UI. Do not introduce a new dependency when one already exists.
+- **Preserve AccessGrid terminology** in code and docs: `Access Pass` in product language, `access_cards` / `AccessCards` in SDK-facing code, `console` for console-managed resources, `X-ACCT-ID` and `X-PAYLOAD-SIG` as the auth headers.
+- **Treat duplicate issuance as a production bug.** Idempotency and reconciliation are required, not optional hardening.
+- **Volatile API specifics live in the official docs and SDK READMEs**, not in this skill. Snapshotted reference articles are noted as snapshots and should be re-fetched if AG ships material changes.
+- **Don't shortcut destructive operations.** Do not delete templates or webhooks on the AG side without an explicit operator action; reconciliation should prefer reading state over forcing it.
 
-- Start by reading the host codebase. Do not invent its models, queues, webhook style, or deployment shape.
-- Prefer extending existing services, jobs, controllers, and admin screens over adding a parallel integration subsystem.
-- If the product already has patterns for providers like Twilio, Stripe, or other external APIs, copy those patterns for config, retries, logging, and testing.
-- Treat duplicate issuance as a production bug. Idempotency and reconciliation are required, not optional hardening.
-- Keep volatile API details in official AccessGrid docs or SDK docs. This skill is for workflow, decisions, and quality gates.
-- Preserve official AccessGrid terminology in code and docs: `Access Pass` in product language, `access_cards` or `AccessCards` in SDK-facing code, and `console` for console-managed resources.
+## The seven phases
 
-## First Pass
+Run these in order. Do not jump ahead — each phase locks decisions that the next depends on.
 
-Before writing code, inspect the host project and answer:
+| # | Phase | Output |
+|---|-------|--------|
+| 1 | Language and SDK | SDK installed (or porting plan if no official SDK) |
+| 2 | Design session | Integration level + UI/API choice locked |
+| 3 | Database discovery | The four canonical tables identified or created |
+| 4 | Migrations | Host schema updated for the chosen level |
+| 5 | Secrets and client wiring | AG client reachable from host code |
+| 6 | Endpoints and lifecycle | Provision / suspend / resume / unlink / delete wired |
+| 7 | Webhooks | Receiver live, dedup, state mapping correct |
 
-1. Deployment model: `cloud` or `on-prem`
-2. Integration depth: `simple`, `comprehensive`, or `deep`
-3. Source workflow: event-driven, polling, or mixed
-4. Sync direction: `PACS->AG` only or bidirectional
-5. Credential source: `site_code/card_number`, raw bytes, or another representation
-6. Delivery owner: AccessGrid-managed messaging or host-app delivery of `install_url`
-7. Tenant model: single-tenant or multi-tenant
+Maintain a running mapping document in the host repo (e.g. `docs/accessgrid-mapping.md`) that captures every decision made across the seven phases — language, integration level, UI/API choice, the four canonical table mappings, secrets locations, webhook subscriptions, encryption mechanisms, backfill plan. Write it as you go and refer back instead of re-asking the user. The contents are dictated by what each phase records below; there is no fixed template.
 
-If the user has not answered these, infer as much as possible from the repo, then state the assumptions you are using in the work. Use the discovery checklist in `references/discovery-and-planning.md` rather than inventing a structure from memory.
+---
 
-After discovery, choose the language reference that matches the host stack and stay in that file unless you need a pattern from another stack.
+## Phase 1 — Language and SDK
 
-## Execution Path
+**Ask first, before anything else:** "What language is your platform built in?" AND PRESENT OPTIONS!
 
-### Step 1: Map the Domain
+### If the language has an official SDK
 
-Create a concrete mapping before coding. Use the template from `scripts/scaffold_mapping_doc.py` if the host project does not already have an integration-doc format.
+JavaScript / TypeScript, Ruby, Go, Python, C# / .NET, Java, PHP — install the SDK per the matching reference file:
 
-- Host cardholder identifier -> AccessGrid cardholder fields
-- Host credential identifier -> `metadata.pacs_credential_id`
-- Tenant/site identifiers -> AccessGrid grouping fields or config references
-- Host lifecycle states -> `provision`, `resume`, `suspend`, `delete`
-- Credential payload source -> exact transform used for AccessGrid
+| Language | Reference |
+|----------|-----------|
+| JavaScript / TypeScript | [references/node-typescript.md](./references/node-typescript.md) |
+| Ruby (incl. Rails) | [references/ruby-on-rails.md](./references/ruby-on-rails.md) |
+| Go | [references/go.md](./references/go.md) |
+| Python | [references/python.md](./references/python.md) |
+| C# / .NET | [references/csharp.md](./references/csharp.md) |
+| Java | [references/java.md](./references/java.md) |
+| PHP (incl. Laravel) | [references/laravel-php.md](./references/laravel-php.md) |
 
-Do not leave this as implicit code behavior. Write it down.
+Each reference file contains: install command, minimum runtime version, client init, provisioning / lifecycle method signatures, webhook receiver, and encryption-at-rest guidance.
 
-### Step 2: Choose the Smallest Viable Track
+**Check the SDK repo's Releases page** for the latest version before pinning. The reference files use the latest version as of skill snapshot date; releases ship.
 
-#### Track A: `simple`
+The SDK handles auth signing transparently. If you need to understand the wire format (debugging signature failures, building a raw-HTTP adapter for an unsupported endpoint), see [references/api-authentication.md](./references/api-authentication.md).
 
-Use when the host app only needs to issue and manage credentials using existing AccessGrid templates.
+### If the language does not have an official SDK
 
-Implement:
+Examples: Elixir, Rust, Kotlin (not via the Java SDK), Scala, Crystal, Clojure, F#.
 
-- AccessGrid client/auth setup
-- Provision flow
-- Suspend, resume, and delete flows
-- Idempotency key or deterministic dedupe behavior
-- Basic operator-facing error visibility
+Read [references/no-sdk-porting.md](./references/no-sdk-porting.md) and [references/api-authentication.md](./references/api-authentication.md). Workflow:
 
-Reference implementation patterns:
+1. Read [references/api-authentication.md](./references/api-authentication.md) — this is the wire-level signing spec, the most failure-prone part of a port.
+2. Read https://github.com/Access-Grid/accessgrid-py end-to-end. It is the reference implementation.
+3. Read https://accessgrid.com/docs for endpoint shapes and rate limits.
+4. Port only the surface the chosen integration level needs (Phase 2).
+5. Test parity against the Python SDK before deploying.
 
-- Python: `references/python.md`
-- Go: `references/go.md`
-- Java: `references/java.md`
-- C#/.NET: `references/csharp.md`
-- Node/TypeScript: `references/node-typescript.md`
-- Rails: `references/ruby-on-rails.md`
-- Laravel/PHP: `references/laravel-php.md`
+---
 
-Do not implement:
+## Phase 2 — Design session
 
-- AccessGrid template CRUD
-- Landing page CRUD
-- Deep credential-profile or SmartTap automation
+A short, structured conversation with the user. Don't skip this — the choices made here drive every subsequent migration and endpoint.
 
-#### Track B: `comprehensive`
+### Step 2a — Integration level
 
-Use when the host app must manage more of the AccessGrid configuration itself.
+Ask: "There are four levels of integration. Which one do you want?"
 
-Implement everything in `simple`, plus:
+| Level | What it gives you | Reference |
+|-------|---------------------|-----------|
+| **MVP** | Static templates pre-created in the AG console; issuance + lifecycle + webhooks | [references/integration-mvp.md](./references/integration-mvp.md) |
+| **Essential** | MVP + dynamic templates as DB rows + webhooks as DB rows | [references/integration-essential.md](./references/integration-essential.md) |
+| **Complete** | Essential + editable templates with branding + credential profiles + bundles + operator UI | [references/integration-complete.md](./references/integration-complete.md) |
+| **Premium** | Complete + landing pages + ledger items | [references/integration-premium.md](./references/integration-premium.md) |
 
-- Card template creation/update/publish flow
-- Landing page strategy and storage of template/page references
-- Webhook receiver and reconciliation if the product is cloud-hosted
-- Per-tenant config persistence if the host app is multi-tenant
+Each level is strictly cumulative — Essential includes everything in MVP, etc.
 
-Reference implementation patterns:
+Recommend **Essential** as the default starting point unless the user has a strong reason to go lower (one-product host with no per-tenant customization → MVP) or higher (customer-facing dashboard for AG management → Complete or Premium).
 
-- Python: `references/python.md`
-- Go: `references/go.md`
-- Java: `references/java.md`
-- C#/.NET: `references/csharp.md`
-- Node/TypeScript: `references/node-typescript.md`
-- Rails: `references/ruby-on-rails.md`
-- Laravel/PHP: `references/laravel-php.md`
+### Step 2b — UI / API / Both
 
-#### Track C: `deep`
+Ask: "Do you want a UI implementation, an API implementation, or both?"
 
-Use when the host app is expected to fully manage advanced AccessGrid setup and support workflows.
+- **API.** Endpoints in the host's existing API surface; lifecycle as REST or RPC matching house style.
+- **UI.** New screens in the host admin / operator dashboard.
+- **Both.** UI calls the same API.
 
-Implement everything in `comprehensive`, plus:
+The integration-level reference files spell out what UI and API look like at each tier.
 
-- Credential profile automation
-- Secure key generation and encrypted persistence
-- Reveal-once handling where required
-- Template-pair management
-- Strong auditability and support tooling
+### Lock the choices in the mapping doc
 
-Only choose `deep` if the host product actually needs these features now.
+After the user answers, write integration level and UI/API choice into the mapping doc (section 2). Don't re-ask later.
 
-### Step 3: Fit the Architecture
+---
 
-#### If `cloud`
+## Phase 3 — Database discovery
 
-Preferred pattern:
+Locate the four canonical concepts AccessGrid binds to. Use [references/database-discovery.md](./references/database-discovery.md) for the discovery procedure and the prompt pattern.
 
-- Host event or webhook triggers provisioning/update
-- AccessGrid webhook updates host state
+The four concepts:
 
-Required behavior:
+1. **Credential Holders** — people the credentials belong to (often `users`, `identities`, `people`)
+2. **Credentials** — the actual cards / passes (often `credentials`, `cards`, `badges`)
+3. **Credential Formats** — bit format definitions (often `card_formats`, `bit_formats`)
+4. **Event Logs** — audit / activity trail (often `events`, `audit_logs`, `activities`)
 
-- Signature validation for inbound webhooks
-- Replay protection
-- Idempotent processing keyed by event ID or deterministic business key
-- Retry only for `429` and `5xx`
+**Confirm with the user one concept at a time.** Don't batch — give them space to think:
 
-See the host language reference listed above for the webhook skeleton.
+> "Which table best represents the idea of **Credential Holders** in your existing system?
+> A. `users`  B. `identities`  C. `people`  D. Something else (type it)"
 
-#### If `on-prem`
+If a concept is missing, walk the user through creating it before any AG migration. All four are required even for MVP.
 
-Preferred pattern:
+Also ask: "Should the 'is mobile wallet credential' flag live on the Credential Formats table or the Credentials table?" — both valid; record the answer.
 
-- Long-running sync worker reconciles PACS state with AccessGrid
+---
 
-Required behavior:
+## Phase 4 — Migrations
 
-- Durable checkpoints or watermarks
-- Safe restart semantics
-- Permanent failure queue or equivalent operator-visible error state
+### General migration (every level)
 
-See `references/python.md` for the primary polling-agent skeleton. Mirror the same checkpoint and replay rules in Go, Java, and C# when those stacks run long-lived agents.
+On the **Credentials** table:
 
-### Step 4: Implement a Vertical Slice First
+- `accessgrid_id` — string(64), nullable, indexed, unique-when-not-null
+- `state` — enum (`created`, `active`, `suspended`, `unlink`, `deleted`); see [references/pass-state-transitions.md](./references/pass-state-transitions.md)
 
-Before broadening scope, get one credential all the way through:
+On Credentials **or** Credential Formats (per the user's choice in Phase 3):
 
-1. Select one real issuance path.
-2. Implement provisioning with correct metadata and mapping.
-3. Persist the AccessGrid card/pass identifier back to the host model.
-4. Implement suspend/resume/delete from the same source record.
-5. Verify replay of the same source event does not create duplicates.
+- `is_mobile_wallet_credential` — boolean, not null, default false
 
-After that works, generalize to bulk flows, additional tenants, or admin tooling.
+Per-framework migration snippets are in [references/integration-mvp.md](./references/integration-mvp.md).
 
-## Non-Negotiables
+### Level-specific migrations
 
-### Idempotency and Dedupe
+Apply on top of the general migration:
+
+- **MVP:** nothing further. Three template IDs live in env vars.
+- **Essential:** see [references/integration-essential.md](./references/integration-essential.md) — `card_templates`, `card_template_credential_formats`, `webhooks`.
+- **Complete:** see [references/integration-complete.md](./references/integration-complete.md) — adds branding columns to `card_templates`; adds `credential_profiles`, `credential_profile_keys`, `credential_profile_files`, `card_template_bundles`.
+- **Premium:** see [references/integration-premium.md](./references/integration-premium.md) — adds `landing_pages`, `ledger_items`.
+
+### Validations to add at the ORM layer
+
+- **Enums** must use the host's enum mechanism (`enum` in Rails, `choices=` in Django, ENUM in MySQL/Postgres, TS union types, etc.).
+- **Image dimensions and formats** on `card_templates.logo` / `background` / `icon` — see [references/image-dimensions.md](./references/image-dimensions.md). Reject before upload, surface clear errors.
+- **Color fields** validate as hex (`#RRGGBB` or `#RRGGBBAA`).
+- **Bearer tokens and key values MUST be encrypted at rest.** Per-framework mechanisms are in [references/integration-essential.md](./references/integration-essential.md).
+- **`card_template_bundles`**: at-least-one-platform CHECK constraint.
+- **`landing_pages`**: enforce universal/personalized mutual exclusivity (universal → no password; personalized → no `allow_immediate_download`).
+
+---
+
+## Phase 5 — Secrets and client wiring
+
+Store these secrets in whatever mechanism the host already uses (env vars, vault, encrypted credentials file, KMS). **Never in plaintext source control.**
+
+Always required:
+
+- `ACCESSGRID_ACCOUNT_ID`
+- `ACCESSGRID_SECRET_KEY`
+
+MVP-only (templates and webhook bearer are env-resident at MVP, then move to DB at Essential+):
+
+- `ACCESSGRID_IOS_TEMPLATE_ID`
+- `ACCESSGRID_ANDROID_TEMPLATE_ID`
+- `ACCESSGRID_SAMSUNG_TEMPLATE_ID`
+- `ACCESSGRID_WEBHOOK_BEARER`
+
+Ask the user: "Do you operate a separate sandbox / dev AG account from prod?" — if yes, double every secret with the host's environment-split convention.
+
+Wire the SDK client in the host's standard place for external clients — service provider (Laravel), initializer (Rails), DI container (Spring/.NET), package-level singleton (Go), etc. See the per-language reference file.
+
+---
+
+## Phase 6 — Endpoints and lifecycle
+
+Build a **vertical slice first.** Before broadening scope, get one credential all the way through:
+
+1. Issue one credential via the host's normal flow.
+2. Persist `accessgrid_id` and `state=created` on the host record.
+3. Confirm install on a real device (iOS *and* Android).
+4. Suspend, resume, unlink, delete — each via host UI/API.
+5. Replay the original issuance trigger. **No duplicate.**
+
+Only after that works, generalize to bulk flows, multi-tenant, admin tooling, etc.
+
+### Endpoint design
+
+The integration-level reference files describe the endpoints per level. Defaults:
+
+- **Provision**: `POST /credentials/:id/wallet-pass` → `{ install_url, accessgrid_id, state }`
+- **Suspend / Resume / Unlink**: `POST /credentials/:id/wallet-pass/(suspend|resume|unlink)`
+- **Delete**: `DELETE /credentials/:id/wallet-pass`
+- **Template CRUD** (Essential+): `/card-templates` REST resource
+- **Webhook registration CRUD** (Essential+): `/accessgrid-webhooks` REST resource
+- **Credential profile CRUD** (Complete+): `/credential-profiles`
+- **Landing page CRUD** (Premium): `/landing-pages`
+- **Ledger read** (Premium): `/ledger` (read-only)
+
+Match the verb style and URL convention the host already uses (action endpoints vs sub-resource PATCH). Don't introduce a third pattern.
+
+### Use the SDK
+
+Heavily prefer SDK methods over raw HTTP. The SDK handles signing, error parsing, and resource serialization. Per-language method names are in the reference files.
+
+### Idempotency
+
+Before calling `client.access_cards.provision(...)`, check if the host credential already has an `accessgrid_id`. If yes, fetch the existing pass and return its install URL instead. Storage of the AG ID **must succeed before** the operation is considered complete — wrap in a transaction or compensate on persistence failure.
+
+---
+
+## Phase 7 — Webhooks
+
+Read [references/webhook-events.md](./references/webhook-events.md) for the full event catalog, recommended subscriptions per integration level, transport (CloudEvents 1.0), and receiver non-negotiables.
+
+### Subscribe to (per level)
+
+- **MVP**: All `ag.access_pass.*` + `ag.webhook.cert_expiring` + `ag.account_balance.low`
+- **Essential**: MVP + all `ag.card_template.*`
+- **Complete**: Essential + all `ag.credential_profile.*`
+- **Premium**: Complete + all `ag.landing_page.*` + `ag.account.impersonation_*`
+
+### Map events to credential state
+
+The `state` enum on Credentials mirrors AccessGrid pass states. See [references/pass-state-transitions.md](./references/pass-state-transitions.md) for the full state machine and event→state table.
+
+### Receiver non-negotiables
+
+1. Verify bearer token (or mTLS) on every request. 401 on mismatch.
+2. Validate envelope: `specversion == "1.0"` and `source == "accessgrid"`. 400 on mismatch.
+3. Dedupe by `id`. TTL ≥ 7 days.
+4. Handle unknown `type` by logging and returning 200 — do not 500 on a new event.
+5. Always return `{"received": true}` with 200/201 on success. Anything else triggers up to 6 hours of AG retries.
+6. Process async if work might exceed ~5 seconds.
+7. Idempotent state writes. Re-applying suspend on an already-suspended credential is a no-op, not an error.
+
+---
+
+## Non-negotiables (apply at every level)
+
+### Idempotency and dedupe
 
 - Every provisioning path must be safely replayable.
-- Store enough state to correlate host credential ID to AccessGrid object ID.
-- If the network fails after a create call, the retry path must not blindly create another credential.
+- Store enough state to correlate host credential ID ↔ AccessGrid object ID.
+- If the network fails after `provision`, the retry path must not blindly create another credential.
 
-Preferred keys:
+Preferred dedupe keys: source event ID if trustworthy, else a deterministic key from tenant + host credential ID + operation.
 
-- Source event ID if trustworthy
-- Otherwise a deterministic key from tenant plus host credential ID plus operation
-
-### Retry Policy
+### Retry policy
 
 Retry:
-
 - HTTP `429` while respecting `Retry-After`
-- HTTP `5xx`
+- HTTP `5xx` with exponential backoff and jitter, max 3 attempts
 
 Do not retry automatically:
+- `400`, `401`, `403`, `404`, `409`, `422`
 
-- `400`
-- `401`
-- `403`
-- `404`
-- `409`
-- `422`
-
-Surface terminal failures in the host app’s normal error path.
+Surface terminal failures in the host app's normal error path.
 
 ### Observability
 
 Every integration action should be traceable with:
 
-- Host credential/cardholder ID
-- Tenant/site ID if applicable
+- Host credential / cardholder ID
+- Tenant / site ID if applicable
 - AccessGrid object ID once known
 - Operation name
 - Outcome
 - Correlation ID or request ID if the stack supports it
 
-### UX Constraints
+Subscribe `ag.account_balance.low` and `ag.webhook.cert_expiring` to your existing alerting (Slack / pager / email).
 
-- Use existing host-app UI patterns.
-- Do not build a separate admin app for v1.
+### Secrets
+
+- Never commit `ACCESSGRID_SECRET_KEY` or webhook bearer tokens in plaintext.
+- Use the host's existing KMS / vault / encrypted credentials store.
+- `webhooks.bearer_token` (Essential+) and `credential_profile_keys.key_value` (Complete+) MUST be encrypted at rest in the database.
+
+### UX
+
+- Use existing host-app UI patterns. No separate admin app for v1.
 - Issuance UI must disclose billable events if issuance incurs cost.
-- Placeholder art assets must be clearly labeled as non-production.
+- Placeholder branding assets must be clearly labeled non-production.
 
-## Testing and Verification
+---
 
-Minimum acceptable verification:
+## Completion standard
 
-1. Provision one credential successfully.
-2. Install or confirm install flow for the target wallet platform.
-3. Suspend the credential.
-4. Resume the credential.
-5. Delete or revoke the credential.
-6. Replay the original issuance trigger and confirm no duplicate is created.
+The integration is not done until **all** of these are true:
 
-If automated tests are practical in the host codebase, add them around:
+- [ ] The host app can issue a credential from its normal workflow.
+- [ ] Install confirmed on a real device for every target platform.
+- [ ] Lifecycle updates stay in sync without manual database edits.
+- [ ] Duplicate source events do not create duplicate credentials.
+- [ ] Required secrets are documented and loaded correctly.
+- [ ] Webhook receiver dedupes and acks per the non-negotiables.
+- [ ] Sensitive columns are verified encrypted at rest by inspecting raw DB values.
+- [ ] Another engineer can identify where mapping, retries, and reconciliation live.
+- [ ] Per-level checklist (in the matching integration-level reference) is fully checked.
 
-- Mapping logic
-- Lifecycle decision logic
-- Dedupe behavior
-- Webhook signature validation or sync checkpoint logic
+---
 
-Use the examples in the language-specific reference to match the host test style.
+## What to avoid
 
-## Completion Standard
-
-The integration is not done until all of these are true:
-
-- The host app can issue a credential from its normal workflow.
-- Lifecycle updates stay in sync without manual database edits.
-- Duplicate source events do not create duplicate credentials.
-- Required secrets/config are documented and loaded correctly.
-- Another engineer can identify where mapping, retries, and reconciliation live.
-
-## What To Avoid
-
-- Building a demo path that bypasses host models
-- Hardcoding tenant-specific IDs without documenting where they belong
-- Shipping provisioning without storing the returned AccessGrid identifier
-- Creating new UI conventions when the product already has established ones
-- Copying volatile API schemas into this skill instead of checking official docs
+- Building a demo path that bypasses host models.
+- Hardcoding tenant-specific IDs without documenting where they belong.
+- Shipping provisioning without storing the returned `accessgrid_id`.
+- Creating new UI conventions when the product already has established ones.
+- Copying volatile AG API schemas into this skill instead of consulting official docs.
+- Falling back to a default template when the right one can't be found — fail loud, fail clear.
+- Bypassing webhook signature / bearer verification "just for dev."
+- Storing bearer tokens or credential profile keys unencrypted.
+- Letting `is_mobile_wallet_credential` placement be implicit — always ask.

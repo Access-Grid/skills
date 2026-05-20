@@ -2,85 +2,132 @@
 
 Use this file when the host stack is Java.
 
-## Official SDK Shape
+## Install
 
-The README shows:
+**Maven:**
+```xml
+<dependency>
+    <groupId>com.accessgrid</groupId>
+    <artifactId>access-grid-sdk</artifactId>
+    <version>1.3.0</version>
+</dependency>
+```
 
-- `new AccessGrid(accountId, secretKey)`
-- `client.accessCards()` for access-card lifecycle work
-- `client.console()` for enterprise console features
+**Gradle:**
+```groovy
+implementation 'com.accessgrid:access-grid-sdk:1.3.0'
+```
+
+Requires Java 11+. Bump the version to the latest release when starting a new integration — check https://github.com/Access-Grid/accessgrid-java/releases.
+
+## Client
 
 ```java
-AccessGrid client = new AccessGrid(
+AccessGridClient client = new AccessGridClient(
     System.getenv("ACCOUNT_ID"),
     System.getenv("SECRET_KEY")
 );
 ```
 
-The SDK should own `X-ACCT-ID` and `X-PAYLOAD-SIG` signing.
+The SDK owns `X-ACCT-ID` and `X-PAYLOAD-SIG` signing.
 
-## Access Pass Provisioning
-
-```java
-Map<String, Object> payload = new HashMap<>();
-payload.put("card_template_id", "0xd3adb00b5");
-payload.put("employee_id", "123456789");
-payload.put("site_code", credential.siteCode());
-payload.put("card_number", credential.cardNumber());
-payload.put("full_name", credential.fullName());
-payload.put("email", credential.email());
-payload.put("phone_number", credential.phoneNumber());
-payload.put("classification", credential.classification());
-payload.put("metadata", Map.of("pacs_credential_id", credential.id()));
-
-Card card = client.accessCards().provision(payload);
-```
-
-## Lifecycle Operations
-
-The Java README excerpt I verified did not show suspend/resume/delete examples. Confirm those exact method names in the package source or live docs before using them.
-
-## Console Resources
+## Provisioning
 
 ```java
-Map<String, Object> template = client.console().createTemplate(
-    Map.of(
-        "name", "Employee Access Pass",
-        "platform", "apple",
-        "use_case", "corporate_id",
-        "protocol", "desfire"
-    )
-);
+ProvisionCardRequest request = ProvisionCardRequest.builder()
+    .cardTemplateId(template.getAccessgridId())
+    .employeeId(credential.getHolder().getExternalId())
+    .tagId(credential.getCardNumber())
+    .fullName(credential.getHolder().getFullName())
+    .email(credential.getHolder().getEmail())
+    .metadata(Map.of("pacs_credential_id", credential.getId().toString()))
+    .build();
+
+Card card = client.accessCards().provision(request);
+
+credentialsRepo.attachAccessGridId(credential.getId(), card.getId());
 ```
 
-## Webhook Handling
+## Lifecycle
 
-The Java README excerpt I verified did not show receiver verification code. Build that from the official webhook docs.
+```java
+client.accessCards().suspend(accessgridId);
+client.accessCards().resume(accessgridId);
+client.accessCards().unlink(accessgridId);
+client.accessCards().delete(accessgridId);
+```
+
+Confirm method names against the installed SDK version.
+
+## Webhook receiver (Spring)
 
 ```java
 @RestController
 public final class AccessGridWebhookController {
-    @PostMapping("/webhooks/accessgrid")
-    public ResponseEntity<Map<String, Object>> handle(
-        @RequestBody String rawBody
-    ) throws Exception {
-        WebhookEvent event = objectMapper.readValue(rawBody, WebhookEvent.class);
-        if (webhookEventsRepo.hasProcessed(event.id())) {
-            return ResponseEntity.ok(Map.of("ok", true, "duplicate", true));
+
+    @Value("${accessgrid.webhook.bearer}")
+    private String expectedBearer;
+
+    @PostMapping(value = "/webhooks/accessgrid",
+                 consumes = "application/cloudevents+json")
+    public ResponseEntity<Map<String, Boolean>> handle(
+            @RequestHeader(value = "Authorization", required = false) String auth,
+            @RequestBody Map<String, Object> event) {
+
+        if (auth == null || !auth.equals("Bearer " + expectedBearer)) {
+            return ResponseEntity.status(401).build();
+        }
+        if (!"1.0".equals(event.get("specversion")) ||
+            !"accessgrid".equals(event.get("source"))) {
+            return ResponseEntity.badRequest().build();
         }
 
-        webhookEventsRepo.markReceived(event.id(), event.type());
+        String eventId = (String) event.get("id");
+        if (webhookEventsRepo.hasProcessed(eventId)) {
+            return ResponseEntity.ok(Map.of("received", true));
+        }
+        webhookEventsRepo.markReceived(eventId, (String) event.get("type"));
 
-        switch (event.type()) {
-            case "credential.suspended" ->
-                credentialsRepo.markSuspendedByAccessGrid(event.data().metadata().pacsCredentialId());
-            case "credential.resumed" ->
-                credentialsRepo.markActiveByAccessGrid(event.data().metadata().pacsCredentialId());
-            default -> webhookEventsRepo.markIgnored(event.id());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> data = (Map<String, Object>) event.getOrDefault("data", Map.of());
+        String accessgridId = (String) data.get("access_pass_id");
+
+        switch ((String) event.get("type")) {
+            case "ag.access_pass.activated" ->
+                credentialsRepo.setStateByAccessGridId(accessgridId, "active");
+            case "ag.access_pass.suspended" ->
+                credentialsRepo.setStateByAccessGridId(accessgridId, "suspended");
+            case "ag.access_pass.resumed" ->
+                credentialsRepo.setStateByAccessGridId(accessgridId, "active");
+            case "ag.access_pass.unlinked" ->
+                credentialsRepo.setStateByAccessGridId(accessgridId, "unlink");
+            case "ag.access_pass.deleted" ->
+                credentialsRepo.setStateByAccessGridId(accessgridId, "deleted");
+            default -> { /* Unknown — log and ack */ }
         }
 
-        webhookEventsRepo.markProcessed(event.id());
-        return ResponseEntity.ok(Map.of("ok", true));
+        webhookEventsRepo.markProcessed(eventId);
+        return ResponseEntity.ok(Map.of("received", true));
     }
+}
+```
+
+See [webhook-events.md](./webhook-events.md) for the full event catalog.
+
+## Encryption-at-rest
+
+Implement a JPA `AttributeConverter` that wraps AES-GCM with a key from your KMS (AWS Secrets Manager, Vault, Azure Key Vault). Apply to `webhooks.bearer_token` and `credential_profile_keys.key_value`:
+
+```java
+@Converter
+public class EncryptedStringConverter implements AttributeConverter<String, String> {
+    public String convertToDatabaseColumn(String plain)   { return kms.encrypt(plain); }
+    public String convertToEntityAttribute(String cipher) { return kms.decrypt(cipher); }
+}
+
+@Entity
+class Webhook {
+    @Convert(converter = EncryptedStringConverter.class)
+    private String bearerToken;
 }
 ```

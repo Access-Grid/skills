@@ -1,101 +1,133 @@
-# C# Patterns
+# C# / .NET Patterns
 
 Use this file when the host stack is C# or .NET.
 
-## Official SDK Shape
+## Install
 
-The README shows:
+```bash
+dotnet add package accessgrid --version 1.5.0
+```
 
-- `new AccessGrid(accountId, secretKey)`
-- `_client.AccessCards` for access-card lifecycle work
-- `_client.Console` for enterprise console features
+Bump the version to latest when starting fresh — check https://www.nuget.org/packages/accessgrid.
+
+## Client
 
 ```csharp
-var client = new AccessGrid(
-    Environment.GetEnvironmentVariable("ACCOUNT_ID")!,
-    Environment.GetEnvironmentVariable("SECRET_KEY")!
+var client = new AccessGridClient(
+    Environment.GetEnvironmentVariable("ACCESSGRID_ACCOUNT_ID")!,
+    Environment.GetEnvironmentVariable("ACCESSGRID_SECRET_KEY")!
 );
 ```
 
-The SDK should own `X-ACCT-ID` and `X-PAYLOAD-SIG` signing.
+**Note:** the .NET SDK reads `ACCESSGRID_ACCOUNT_ID` / `ACCESSGRID_SECRET_KEY` (prefixed) rather than the bare `ACCOUNT_ID` / `SECRET_KEY` used by other SDKs. Match the prefix the host already uses for secrets, or alias env vars consistently in your deployment config.
 
-## Access Pass Provisioning
+Authentication wire format: `X-ACCT-ID` (account ID) and `X-PAYLOAD-SIG` (HMAC signature) headers, owned by the SDK.
+
+## Provisioning
 
 ```csharp
-var payload = new Dictionary<string, object?>
-{
-    ["card_template_id"] = "0xd3adb00b5",
-    ["employee_id"] = "123456789",
-    ["full_name"] = credential.FullName,
-    ["metadata"] = new Dictionary<string, object?>
+var card = await client.AccessCards.ProvisionAsync(
+    new ProvisionCardRequest
     {
-        ["pacs_credential_id"] = credential.Id,
-    },
-    ["site_code"] = credential.SiteCode,
-    ["card_number"] = credential.CardNumber,
-};
+        CardTemplateId = template.AccessGridId,
+        EmployeeId     = credential.Holder.ExternalId,
+        FullName       = credential.Holder.FullName,
+        Email          = credential.Holder.Email,
+        StartDate      = DateTime.UtcNow,
+        ExpirationDate = DateTime.UtcNow.AddYears(1),
+        Metadata       = new Dictionary<string, string>
+        {
+            ["pacs_credential_id"] = credential.Id.ToString()
+        }
+    }
+);
 
-var card = await client.AccessCards.Provision(payload);
+await credentialsRepo.AttachAccessGridIdAsync(credential.Id, card.Id);
+Console.WriteLine($"Install URL: {card.Url}");
 ```
 
-## Lifecycle Operations
-
-The C# README excerpt I verified did not show suspend/resume/delete examples. Confirm exact method names in the package source or live docs before using them.
-
-## Console Resources
+## Lifecycle
 
 ```csharp
-var template = await client.Console.CreateTemplate(new CardTemplateInput
-{
-    Name = "Employee Access Pass",
-    Platform = "apple",
-    UseCase = "corporate_id",
-    Protocol = "desfire"
-});
+await client.AccessCards.SuspendAsync(accessgridId);
+await client.AccessCards.ResumeAsync(accessgridId);
+await client.AccessCards.UnlinkAsync(accessgridId);
+await client.AccessCards.DeleteAsync(accessgridId);
 ```
 
-## Webhook Handling
+Confirm method names against the installed SDK version.
 
-The C# README excerpt I verified did not show receiver verification code. Build that from the official webhook docs.
+## Webhook receiver (ASP.NET)
 
 ```csharp
 [ApiController]
 [Route("webhooks/accessgrid")]
 public sealed class AccessGridWebhookController : ControllerBase
 {
-    [HttpPost]
-    public async Task<IActionResult> Post(CancellationToken cancellationToken)
+    private readonly IConfiguration _config;
+    private readonly IWebhookEventsRepository _events;
+    private readonly ICredentialsRepository _creds;
+
+    public AccessGridWebhookController(IConfiguration config,
+        IWebhookEventsRepository events, ICredentialsRepository creds)
     {
+        _config = config; _events = events; _creds = creds;
+    }
+
+    [HttpPost]
+    [Consumes("application/cloudevents+json")]
+    public async Task<IActionResult> Post(CancellationToken ct)
+    {
+        var auth = Request.Headers.Authorization.ToString();
+        var expected = "Bearer " + _config["AccessGrid:WebhookBearer"];
+        if (!string.Equals(auth, expected, StringComparison.Ordinal)) return Unauthorized();
+
         using var reader = new StreamReader(Request.Body);
-        var rawBody = await reader.ReadToEndAsync(cancellationToken);
-        var eventPayload = JsonSerializer.Deserialize<WebhookEvent>(rawBody)!;
+        var raw = await reader.ReadToEndAsync(ct);
+        var ev = JsonSerializer.Deserialize<JsonElement>(raw);
 
-        if (await _webhookEventsRepo.HasProcessedAsync(eventPayload.Id, cancellationToken))
+        if (ev.GetProperty("specversion").GetString() != "1.0" ||
+            ev.GetProperty("source").GetString() != "accessgrid") return BadRequest();
+
+        var id   = ev.GetProperty("id").GetString()!;
+        var type = ev.GetProperty("type").GetString()!;
+
+        if (await _events.HasProcessedAsync(id, ct)) return Ok(new { received = true });
+        await _events.MarkReceivedAsync(id, type, ct);
+
+        var accessgridId = ev.TryGetProperty("data", out var data)
+            && data.TryGetProperty("access_pass_id", out var apid)
+                ? apid.GetString() : null;
+
+        switch (type)
         {
-            return Ok(new { ok = true, duplicate = true });
+            case "ag.access_pass.activated":
+                await _creds.SetStateByAccessGridIdAsync(accessgridId!, "active", ct); break;
+            case "ag.access_pass.suspended":
+                await _creds.SetStateByAccessGridIdAsync(accessgridId!, "suspended", ct); break;
+            case "ag.access_pass.resumed":
+                await _creds.SetStateByAccessGridIdAsync(accessgridId!, "active", ct); break;
+            case "ag.access_pass.unlinked":
+                await _creds.SetStateByAccessGridIdAsync(accessgridId!, "unlink", ct); break;
+            case "ag.access_pass.deleted":
+                await _creds.SetStateByAccessGridIdAsync(accessgridId!, "deleted", ct); break;
+            // Unknown types fall through — always ack 200.
         }
 
-        await _webhookEventsRepo.MarkReceivedAsync(eventPayload.Id, eventPayload.Type, cancellationToken);
-
-        switch (eventPayload.Type)
-        {
-            case "credential.suspended":
-                await _credentialsRepo.MarkSuspendedByAccessGridAsync(
-                    eventPayload.Data.Metadata.PACSCredentialId,
-                    cancellationToken);
-                break;
-            case "credential.resumed":
-                await _credentialsRepo.MarkActiveByAccessGridAsync(
-                    eventPayload.Data.Metadata.PACSCredentialId,
-                    cancellationToken);
-                break;
-            default:
-                await _webhookEventsRepo.MarkIgnoredAsync(eventPayload.Id, cancellationToken);
-                break;
-        }
-
-        await _webhookEventsRepo.MarkProcessedAsync(eventPayload.Id, cancellationToken);
-        return Ok(new { ok = true });
+        await _events.MarkProcessedAsync(id, ct);
+        return Ok(new { received = true });
     }
 }
+```
+
+See [webhook-events.md](./webhook-events.md) for the full event catalog.
+
+## Encryption-at-rest
+
+Use `ValueConverter` plus `IDataProtector` (built-in) or pull from Azure Key Vault / AWS KMS. Apply to `webhooks.bearer_token` and `credential_profile_keys.key_value`:
+
+```csharp
+modelBuilder.Entity<Webhook>()
+    .Property(w => w.BearerToken)
+    .HasConversion(v => _protector.Protect(v), v => _protector.Unprotect(v));
 ```

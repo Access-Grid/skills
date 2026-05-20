@@ -1,77 +1,95 @@
-# Node TypeScript Patterns
+# Node / TypeScript Patterns
 
 Use this file when the host stack is Node.js or TypeScript.
 
-## Official SDK Shape
+## Install
 
-The README shows:
+```bash
+npm install accessgrid
+# or
+yarn add accessgrid
+```
 
-- `new AccessGrid(accountId, secretKey)`
-- `client.accessCards` for access-card lifecycle work
-- `client.console` for enterprise console features
+Requires Node.js 12 or higher. Pin via `package.json`.
+
+## Client
 
 ```ts
+import AccessGrid from 'accessgrid';
+
 const client = new AccessGrid(process.env.ACCOUNT_ID!, process.env.SECRET_KEY!);
 ```
 
-The SDK should own `X-ACCT-ID` and `X-PAYLOAD-SIG` signing.
+The SDK owns `X-ACCT-ID` / `X-PAYLOAD-SIG` signing.
 
 ## Access Pass Provisioning
 
 ```ts
 const card = await client.accessCards.provision({
-  card_template_id: "0xd3adb00b5",
-  employee_id: "123456789",
-  full_name: credential.fullName,
-  metadata: { pacs_credential_id: String(credential.id) },
-  site_code: credential.siteCode,
-  card_number: credential.cardNumber,
+  cardTemplateId: '0xd3adb00b5',
+  employeeId: '123456789',
+  fullName: credential.fullName,
   email: credential.email,
-  phone_number: credential.phoneNumber,
-  classification: credential.classification,
+  tagId: 'DDEADB33FB00B5',
+  metadata: { pacs_credential_id: String(credential.id) },
 });
+
+console.log(`Install URL: ${card.url}`);
 ```
 
 ## Lifecycle Operations
 
-The JS README excerpt I verified did not show suspend/resume/delete examples. Confirm exact method names in the package source or live docs before using them.
-
-## Console Resources
-
 ```ts
-const webhook = await client.console.createWebhook({
-  name: "Prod Webhook",
-  target_url: "https://host.example.com/webhooks/accessgrid",
-});
+await client.accessCards.suspend(accessgridId);
+await client.accessCards.resume(accessgridId);
+await client.accessCards.unlink(accessgridId);
+await client.accessCards.delete(accessgridId);
 ```
 
-## Webhook Handling
+If a method name above differs in the installed SDK version, the README at https://github.com/Access-Grid/accessgrid-js is authoritative.
 
-The JS README does show a receiver example using `CloudEventReceiver` and a webhook `private_key`. Use that pattern instead of inventing your own verifier.
+## Webhook receiver (Express)
 
 ```ts
-export async function handleAccessGridWebhook(request: Request) {
-  const body = await request.text();
-  const receiver = new CloudEventReceiver(process.env.ACCESSGRID_WEBHOOK_PRIVATE_KEY!);
-  const event = receiver.receive(body);
-  if (await webhookEventsRepo.hasProcessed(event.id)) {
-    return Response.json({ ok: true, duplicate: true });
+import express from 'express';
+
+const app = express();
+app.use(express.json({ type: 'application/cloudevents+json' }));
+
+app.post('/webhooks/accessgrid', async (req, res) => {
+  const auth = req.header('Authorization') ?? '';
+  if (auth !== `Bearer ${process.env.ACCESSGRID_WEBHOOK_BEARER}`) {
+    return res.status(401).end();
   }
 
+  const event = req.body;
+  if (event?.specversion !== '1.0' || event?.source !== 'accessgrid') {
+    return res.status(400).end();
+  }
+
+  if (await webhookEventsRepo.hasProcessed(event.id)) {
+    return res.json({ received: true });
+  }
   await webhookEventsRepo.markReceived(event.id, event.type);
 
+  const accessgridId = event.data?.access_pass_id;
   switch (event.type) {
-    case "credential.suspended":
-      await credentialsRepo.markSuspendedByAccessGrid(event.data.metadata.pacs_credential_id);
-      break;
-    case "credential.resumed":
-      await credentialsRepo.markActiveByAccessGrid(event.data.metadata.pacs_credential_id);
-      break;
-    default:
-      await webhookEventsRepo.markIgnored(event.id);
+    case 'ag.access_pass.activated':
+      await credentialsRepo.setStateByAccessgridId(accessgridId, 'active'); break;
+    case 'ag.access_pass.suspended':
+      await credentialsRepo.setStateByAccessgridId(accessgridId, 'suspended'); break;
+    case 'ag.access_pass.resumed':
+      await credentialsRepo.setStateByAccessgridId(accessgridId, 'active'); break;
+    case 'ag.access_pass.unlinked':
+      await credentialsRepo.setStateByAccessgridId(accessgridId, 'unlink'); break;
+    case 'ag.access_pass.deleted':
+      await credentialsRepo.setStateByAccessgridId(accessgridId, 'deleted'); break;
+    // Unknown types fall through — always ack 200.
   }
 
   await webhookEventsRepo.markProcessed(event.id);
-  return Response.json({ ok: true });
-}
+  res.json({ received: true });
+});
 ```
+
+See [webhook-events.md](./webhook-events.md) for the full event catalog.
