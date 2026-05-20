@@ -186,6 +186,25 @@ Ask the user: "Do you operate a separate sandbox / dev AG account from prod?" �
 
 Wire the SDK client in the host's standard place for external clients — service provider (Laravel), initializer (Rails), DI container (Spring/.NET), package-level singleton (Go), etc. See the per-language reference file.
 
+### Existing designs and UI assets (UI / Both implementations only)
+
+Skip this subsection if the user chose API-only in Phase 2.
+
+Before writing any UI code in Phase 6, ask each of the following separately and wait for an answer. Record what you learn in the mapping doc so later phases don't re-ask.
+
+1. **Figma designs.** Ask: *"Do you have Figma designs for the AccessGrid screens — Send-to-wallet button, install-URL/QR display, lifecycle actions (suspend/resume/unlink/delete), and any Essential/Complete/Premium admin UIs (template / profile / landing-page management)?"*
+   - If **yes**: ask the user to connect the Figma MCP server (the Skill tool's `figma:*` skills are unavailable without it) and paste the exact **frame URLs** for each screen. Frame-specific links carry the `node-id` query parameter the MCP needs to fetch the right node — a top-level file link is not enough. If the user isn't sure how, tell them: in Figma, right-click the frame → **Copy link to selection** → paste.
+   - Once received, fetch each frame via the Figma MCP (`figma:figma-use` skill prerequisites apply) and treat the design as authoritative for layout, copy, spacing, and component choice.
+   - If **no**: confirm the user is happy with the agent matching the host app's existing design system without a spec, then continue.
+
+2. **Existing React / Vue / Svelte / HTML / server-rendered templates.** Ask: *"Are there existing components, pages, or templates in this codebase I should read for styling, layout, or pattern reuse?"*
+   - If **yes**: ask for **on-disk paths** (e.g. `app/components/credentials/CredentialDetail.tsx`, `app/views/admin/credentials/show.html.erb`, `resources/views/credentials/show.blade.php`). Read them before generating new UI.
+   - Look specifically for: the design-system primitives in use (Button, Modal, Card, Table); tenant-aware layout wrappers; existing credential-management screens that the AG additions can extend instead of duplicate; and the codebase's CSS / Tailwind / styled-components conventions.
+
+3. **Design tokens or theme files.** Ask: *"Where do colors, spacing, typography, and component variants live?"* Common answers: Tailwind config (`tailwind.config.js`), a theme file (`theme.ts`, `tokens.json`), CSS custom properties in a root stylesheet, an MUI/Chakra/Mantine theme, or a Storybook. Read it before picking colors, sizes, or component variants — never hardcode values that already exist as tokens.
+
+If the user does not have any of the three, default to matching the visual style of the nearest existing host-app admin screen — and surface a note that the AG additions are pattern-matched rather than design-driven, so it can be revisited later.
+
 ---
 
 ## Phase 6 — Endpoints and lifecycle
