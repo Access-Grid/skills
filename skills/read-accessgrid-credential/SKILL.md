@@ -44,11 +44,11 @@ The two transport-specific reference files walk through every step.
 | # | Phase | Output |
 |---|-------|--------|
 | 1 | Hardware and platform | NFC frontend chosen; OS / runtime decided |
-| 2 | Decide scope | Apple only, Google only, or both (almost always both) |
+| 2 | Decide scope and feedback | Transports + reader-local feedback (sound / LED) + device-side error reporting locked |
 | 3 | Set up configuration plumbing | Config delivery mechanism wired *before* keys touch firmware |
 | 4 | Implement Apple ECP2 / DESFire | Both Simple and Key Diversified structures |
 | 5 | Implement Google SmartTap | Reader enrolled with AG, ECDH + decryption working |
-| 6 | Integrate with the access-control bus | OSDP / Wiegand / network output |
+| 6 | Integrate with the access-control bus | OSDP / Wiegand / network output, plus feedback routing |
 | 7 | Field testing | Real Apple Wallet devices, real Google Wallet devices, real failure modes |
 
 Phase 3 is non-negotiable. Wire your config plumbing first, then load real keys into it. Never the other way around.
@@ -75,13 +75,60 @@ Platform / runtime: bare-metal MCU, embedded Linux, or RTOS. The cryptography (A
 
 ---
 
-## Phase 2 — Decide scope
+## Phase 2 — Decide scope and feedback
 
-- **Both transports.** The right answer for any production reader. Apple Wallet and Google Wallet devices will both tap it.
+Three sub-decisions. Ask each **separately** and record all three in the config schema (Phase 3) — they're load-bearing for hardware (Phase 1 if not already locked), config (Phase 3), protocol implementation (Phases 4–5), and host-bus wiring (Phase 6).
+
+### Step 2a — Transport scope
+
+Ask: "Which wallet transports should this reader support?"
+
+- **Both transports (recommended).** The right answer for any production reader. Apple Wallet and Google Wallet devices will both tap it.
 - **Apple only.** Defensible if your install base is exclusively Apple Wallet (closed enterprise rollout where you control device choice).
 - **Google only.** Rare; usually only happens during phased rollouts.
 
 If you start with one, scaffold the config and dispatch logic for the other from day one — see [references/configuration.md](./references/configuration.md).
+
+### Step 2b — Reader-local feedback (sound, LEDs)
+
+Ask: "How should the reader give feedback to the user at the moment of the tap — sound, LEDs, both, or none (host-driven only)?"
+
+| Option | What it implies for hardware + firmware |
+|--------|------------------------------------------|
+| **Buzzer / beeper only** | Piezo or driven speaker on the reader. Firmware emits tones at each outcome (success / failure / activity). No visual feedback. |
+| **LEDs only** | One or more LEDs (typically a single RGB or a green + red pair). Firmware drives them at each outcome. Choose this when the install environment is noise-sensitive (hospitals, libraries). |
+| **Both (recommended)** | Industry default. A short beep + green flash on success, a longer buzz + red flash on failure. Most accessible — covers users who can't hear and users who can't see the indicator. |
+| **None — host-driven only** | The reader emits the card-data report; the panel / controller drives any LEDs or sounders via OSDP / Wiegand-and-side-channel commands. Pick this when the panel already owns the UX and you don't want two systems disagreeing. |
+
+Follow-ups to ask once the option is chosen:
+
+1. **Outcomes to differentiate.** Minimum two (success / failure). Common richer sets: idle / activity-on-tap / success-granted / failure-denied / config-error / offline. Ask which outcomes need a distinct cue.
+2. **Source of truth.** Does the reader decide success/failure (it has read the credential successfully → beep + green), or does the host's grant/deny decision drive the feedback (reader reads, sends to panel, panel sends back a beep/LED command)? OSDP supports both; pick one and document it. Mixing them causes double-beeps and conflicting LED states.
+3. **Hardware presence.** Confirm the chosen NFC frontend / reader board actually has the LEDs and buzzer the answer assumes. If not, Phase 1 needs to revisit.
+
+Record the answer in the config schema as `feedback.mode` (`buzzer` / `led` / `both` / `host`) plus the per-outcome cue table. See [references/configuration.md](./references/configuration.md).
+
+### Step 2c — Device-side error responses (phone / watch)
+
+Ask: "On a failed read — wrong key, malformed payload, auth failure, decompression error, etc. — do you want the reader to return an explicit error response to the phone / watch so the wallet can show feedback to the user, or stay silent (drop the field)?"
+
+| Option | What it means in protocol terms |
+|--------|----------------------------------|
+| **Return errors (recommended for consumer-facing deployments)** | DESFire: respond with the real EV1 status word (`91 AE` auth fail, `91 9D` permission denied, `91 1C` illegal command, `91 7E` length error, etc.) so Apple Wallet can show a "Try again" prompt instead of timing out. SmartTap: respond with the appropriate error status (e.g. `6982` security status not satisfied, `6A88` referenced data not found) so Google Wallet's UI can react. |
+| **Stay silent — drop the field** | Reader simply stops responding; phone times out. Useful for high-throughput access points where a slow error UI on the device would block the queue, or when you specifically don't want to leak which step failed to a hostile prober. |
+| **Generic-only errors** | Compromise: return a single generic failure status (e.g. `6F00` / `91 1E`) for *all* failure modes so the device can prompt the user to retry, without disclosing whether the failure was key auth, integrity, or otherwise. Recommended when phishing / probing is a concern. |
+
+Follow-ups to ask:
+
+1. **Granularity.** If returning errors, do you want **specific** status words per failure mode (better UX, leaks information) or **generic** (worse UX, opaque to a prober)? Pick one policy and apply it consistently — never specific on auth and generic on integrity.
+2. **Watch behavior.** Apple Watch in particular can present pass-specific prompts on certain status codes. If the deployment includes Apple Watch users, lean toward returning errors so the watch can re-prompt the wearer instead of looking dead.
+3. **Logging.** Whichever choice, the reader still logs the *real* failure reason locally with the tag UID — the device-facing response is independent of the internal log line.
+
+Record the answer in the config schema as `feedback.device_errors` (`specific` / `generic` / `silent`).
+
+### Lock the choices
+
+Write Step 2a / 2b / 2c outcomes into the config schema before continuing to Phase 3. The decisions drive hardware confirmation, config schema, the return-code-to-cue mapping in Phase 4 / 5, and the host-bus wiring in Phase 6.
 
 ---
 
@@ -163,6 +210,19 @@ Once the credential is read and parsed, hand it to whatever your reader's host e
 
 This is fully host-specific and out of scope for the protocol references. Match the existing access-control conventions.
 
+### Routing the feedback signals from Phase 2b
+
+The decision in Phase 2b (sound / LED / both / host-driven) decides who owns the cue.
+
+- **Reader-driven** — firmware fires the buzzer and LEDs from the read-loop's outcome (`AG_OK` / `AG_ERR_*`). Fast, no round-trip. Useful when the panel's grant/deny decision matches "did the read succeed" closely enough (Wiegand readers usually run this way).
+- **Host-driven** — reader emits the card-data report and waits; the panel sends explicit feedback commands. OSDP carries this natively:
+  - `osdp_LED` — color, on/off duration, temporary vs. permanent.
+  - `osdp_BUZ` — beeper count, on-time, off-time, repeat.
+  - `osdp_TEXT` — for readers with a small display.
+- **Both** — common pattern: reader fires a short "I read something" cue locally (e.g. one quick beep, amber blink), then the panel's `osdp_LED` / `osdp_BUZ` overrides with the final grant/deny indication. Document the precedence rule.
+
+Whichever you wired in Phase 2b, route the relevant config (`feedback.mode`, the per-outcome cue table) into your bus-output module. Don't reach for new globals — use the same `cfg` object.
+
 ---
 
 ## Phase 7 — Field testing
@@ -177,6 +237,10 @@ Minimum acceptable verification before shipping:
 - [ ] Concurrent taps from two devices in the field (some readers can poll multiple targets).
 - [ ] Key rotation works — push a new key via your config channel without flashing firmware.
 - [ ] Reader recovers from an unplugged-then-replugged NFC frontend.
+- [ ] Reader-local feedback matches Phase 2b: a success tap produces the configured success cue (sound and/or LED); a failure produces the configured failure cue. Cues are distinguishable in a noisy environment for the deployment.
+- [ ] Host-driven feedback path (if enabled) — `osdp_LED` / `osdp_BUZ` from the panel reaches the reader and overrides / supplements the local cue per the documented precedence.
+- [ ] Device-side error responses match Phase 2c: induce wrong-key, integrity-fail, and malformed-payload conditions; confirm Apple Wallet and Google Wallet show the expected behavior (retry prompt, generic failure, or silent timeout) on real devices including Apple Watch if in scope.
+- [ ] No information leak in error responses if the policy is "generic" — verify the same status word is returned for distinct failure modes.
 
 ---
 
@@ -207,3 +271,5 @@ It's pseudo-code, not a port target. Read it to confirm you understand the wire 
 - Logging decrypted credential payloads to disk at INFO. They are PII.
 - Trusting status words alone — verify the CRC (DESFire) and HMAC (SmartTap) on every read.
 - Caching the LT EC private key in plaintext on the filesystem. Use a TPM, SE, or HSM if available; otherwise an encrypted flash partition with a key bound to device identity.
+- Mixing the device-error policy across failure modes — being "specific" on auth failures but "generic" on integrity failures lets a prober distinguish them. Pick one policy in Phase 2c and apply it consistently.
+- Driving the buzzer and LEDs from **both** the reader and the panel without a documented precedence rule — you'll ship double-beeps and conflicting LED states.

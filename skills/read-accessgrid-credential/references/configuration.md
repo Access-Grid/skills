@@ -56,6 +56,12 @@ Reader operations
   - OSDP secure channel key   (if OSDP)
   - Output mode               (Wiegand bit count, OSDP report format, network endpoint, etc.)
   - Logging level
+
+Feedback (from SKILL.md Phase 2b / 2c)
+  - feedback.mode             (buzzer | led | both | host)
+  - feedback.cues             (per-outcome cue table; see schema below)
+  - feedback.device_errors    (specific | generic | silent)
+  - feedback.precedence       (reader | host | reader-then-host)  // when both fire
 ```
 
 What MAY be hard-coded:
@@ -113,6 +119,20 @@ Pick JSON, TOML, CBOR, or protobuf to match your platform — the *shape* matter
     "output_mode": "osdp",
     "osdp_address": 0,
     "log_level": "info"
+  },
+
+  "feedback": {
+    "mode": "both",
+    "precedence": "reader-then-host",
+    "device_errors": "generic",
+    "cues": {
+      "idle":            { "led": { "color": "blue",  "pattern": "solid" } },
+      "activity":        { "led": { "color": "amber", "pattern": "blink-fast", "ms": 200 }, "buzzer": { "freq_hz": 2400, "ms": 30 } },
+      "success_granted": { "led": { "color": "green", "pattern": "solid",      "ms": 1500 }, "buzzer": { "freq_hz": 2800, "ms": 80 } },
+      "failure_denied":  { "led": { "color": "red",   "pattern": "blink",      "ms": 1500, "blink_ms": 250 }, "buzzer": { "freq_hz": 1200, "ms": 250, "count": 2 } },
+      "config_error":    { "led": { "color": "red",   "pattern": "blink-slow" } },
+      "offline":         { "led": { "color": "amber", "pattern": "blink-slow" } }
+    }
   }
 }
 ```
@@ -123,6 +143,69 @@ Pick JSON, TOML, CBOR, or protobuf to match your platform — the *shape* matter
 - **Diversified read key** is an *expression*: a templated string that names the source key by id and the variables (`{uid}`, `{aid}`) substituted at runtime. The reader evaluates `aes128cmac(key, data)` to derive the per-card key without ever storing it. See [apple-ecp2-desfire.md](./apple-ecp2-desfire.md) step 4 for the exact AN10922 computation.
 - **SmartTap `keys`** is a dict keyed by version, so multiple versions can coexist during rotation. The reader picks the highest-version key when signing, but accepts any if a phone presents an older `key_version`.
 - **AIDs** in the config are big-endian (human-readable). Convert to little-endian at the protocol layer, never in the config.
+
+---
+
+## Feedback configuration (sounds, LEDs, device error responses)
+
+The `feedback` block expresses the decisions captured in SKILL.md Phase 2b (reader-local sounds/LEDs) and Phase 2c (device-side errors). Treat it as part of the load-bearing config — installers commonly tune these per site without expecting a firmware update.
+
+### `feedback.mode`
+
+| Value | Meaning |
+|-------|---------|
+| `buzzer` | Reader fires sound only. Skips LED writes even if hardware is present. |
+| `led` | Reader fires LEDs only. Skips buzzer even if hardware is present. |
+| `both` | Reader fires sound and LEDs. Default for consumer-facing deployments. |
+| `host` | Reader never fires either; the panel drives LEDs and the buzzer over OSDP / network output. The reader still listens for `osdp_LED` and `osdp_BUZ` and applies them. |
+
+Hardware that doesn't exist is silently skipped — a value of `both` on a reader without a buzzer drives LEDs only and logs a one-shot warning at startup. Never silently fall back to a different `mode`; surface it.
+
+### `feedback.precedence`
+
+Applies only when more than one source might fire a cue (Phase 6).
+
+| Value | Behavior |
+|-------|----------|
+| `reader` | Local cue wins; any `osdp_LED` / `osdp_BUZ` from the host is logged but not applied. |
+| `host` | Local cue suppressed; host's commands always apply. Common when the panel is the source of truth for grant/deny. |
+| `reader-then-host` | Local cue fires immediately at read outcome ("I saw a tap, here's a quick beep"). Host commands override / replace once the panel responds with grant/deny. Default when `mode = both` and OSDP is the host bus. |
+
+### `feedback.cues`
+
+A dict keyed by **outcome name**, each entry carrying the per-channel pattern. Use only the outcomes the deployment cares about — the firmware ignores unknown keys and falls back to `none` (no cue) for missing ones, with a startup log line listing the omissions.
+
+Recommended outcomes (pick the subset needed):
+
+- `idle` — reader at rest, polling.
+- `activity` — tap detected, handshake in progress.
+- `success_granted` — read OK and panel granted (host-driven), or read OK (reader-driven).
+- `failure_denied` — read failed, OR panel denied (depending on `precedence`).
+- `config_error` — boot-time config invalid (e.g. signature failure, missing keys).
+- `offline` — host bus unreachable, network down.
+
+Per-channel keys inside an outcome:
+
+- `led`: `color` (named or `#RRGGBB`), `pattern` (`solid` / `blink` / `blink-fast` / `blink-slow` / `pulse`), `ms` (total duration), `blink_ms` (toggle interval).
+- `buzzer`: `freq_hz`, `ms` (per pulse), `count` (number of pulses), `gap_ms` (gap between pulses).
+
+Keep cues short — a 1.5-second indicator is the upper end for high-throughput access points. Long cues queue up and confuse users during back-to-back taps.
+
+### `feedback.device_errors`
+
+| Value | Behavior on a failed read |
+|-------|----------------------------|
+| `specific` | Reader returns the actual EV1 / 7816 status word for the failure mode (`91 AE` auth, `91 9D` permission, `6982` security status, `6A88` not found, etc.). Best wallet UX; leaks failure-step information to a prober. |
+| `generic` | Reader returns one configured generic failure status for all failure modes (default `6F00` for SmartTap, `91 1E` for DESFire). Wallet shows a uniform "Try again" prompt. Prevents probing. |
+| `silent` | Reader stops responding; phone times out. No wallet UX. Lowest leak surface; worst UX. |
+
+Internal logging is independent of this setting — the reader still logs the real failure reason locally with the tag UID, regardless of what the device sees on the wire.
+
+### Schema tips
+
+- Keep `feedback` versioned alongside the rest of the config so installers can tune cues on a site without re-pushing keys.
+- Never put `feedback.device_errors` in a "user-tunable" UI surface unless operators understand the leak trade-off. Default to `generic`.
+- For OSDP deployments, mirror the per-outcome cues into the equivalent `osdp_LED` / `osdp_BUZ` parameters when the panel needs them — keeping one canonical table avoids the two systems drifting.
 
 ---
 
