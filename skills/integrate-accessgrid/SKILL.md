@@ -18,21 +18,22 @@ This skill is for **integration** into a working codebase. If the user wants a s
 - **Volatile API specifics live in the official docs and SDK READMEs**, not in this skill. Snapshotted reference articles are noted as snapshots and should be re-fetched if AG ships material changes.
 - **Don't shortcut destructive operations.** Do not delete templates or webhooks on the AG side without an explicit operator action; reconciliation should prefer reading state over forcing it.
 
-## The seven phases
+## The eight phases
 
 Run these in order. Do not jump ahead — each phase locks decisions that the next depends on.
 
 | # | Phase | Output |
 |---|-------|--------|
 | 1 | Language and SDK | SDK installed (or porting plan if no official SDK) |
-| 2 | Design session | Integration level + UI/API choice locked |
+| 2 | Design session | Integration level + UI/API choice + billing model locked |
 | 3 | Database discovery | The four canonical tables identified or created |
 | 4 | Migrations | Host schema updated for the chosen level |
 | 5 | Secrets and client wiring | AG client reachable from host code |
-| 6 | Endpoints and lifecycle | Provision / suspend / resume / unlink / delete wired |
-| 7 | Webhooks | Receiver live, dedup, state mapping correct |
+| 6 | Billing integration | Customer billing wired to template + pass lifecycle |
+| 7 | Endpoints and lifecycle | Provision / suspend / resume / unlink / delete wired |
+| 8 | Webhooks | Receiver live, dedup, state mapping correct |
 
-Maintain a running mapping document in the host repo (e.g. `docs/accessgrid-mapping.md`) that captures every decision made across the seven phases — language, integration level, UI/API choice, the four canonical table mappings, secrets locations, webhook subscriptions, encryption mechanisms, backfill plan. Write it as you go and refer back instead of re-asking the user. The contents are dictated by what each phase records below; there is no fixed template.
+Maintain a running mapping document in the host repo (e.g. `docs/accessgrid-mapping.md`) that captures every decision made across the eight phases — language, integration level, UI/API choice, billing model + provider + billing-table mappings, the four canonical table mappings, secrets locations, webhook subscriptions, encryption mechanisms, backfill plan. Write it as you go and refer back instead of re-asking the user. The contents are dictated by what each phase records below; there is no fixed template.
 
 ---
 
@@ -103,9 +104,34 @@ Ask: "Do you want a UI implementation, an API implementation, or both?"
 
 The integration-level reference files spell out what UI and API look like at each tier.
 
+### Step 2c — Billing model
+
+Two questions, asked **separately** (do not batch — operators need to think about each). Record both in the mapping doc; Phase 6 reads from them.
+
+Full guidance, including the rationale behind each answer and how it maps onto the host's billing primitive, lives in [references/billing.md](./references/billing.md). Read that file before asking.
+
+**Question A — Card templates:**
+
+> "Do you plan to charge your customers for **card templates** themselves (the design / issuer record), and if so, how?
+> A. Yes — monthly
+> B. Yes — annually
+> C. No — templates are free or bundled into a parent plan"
+
+Note: card-template billing is only meaningful at Essential+ (MVP templates live in env vars, not per-customer). If the user picked MVP in Step 2a and answers A or B, surface this and confirm.
+
+**Question B — Access passes:**
+
+> "How do you intend to charge for **Access Passes** (the issued credentials)?
+> A. Bundled into other pricing (no separate AG-driven charge)
+> B. Monthly per active pass (metered)
+> C. Annually per pass
+> D. Per issuance (one-time charge each time you issue a pass)"
+
+Record both answers. If either answer is non-bundled, Phase 6 will also discover the host's billing provider and tables.
+
 ### Lock the choices in the mapping doc
 
-After the user answers, write integration level and UI/API choice into the mapping doc (section 2). Don't re-ask later.
+After the user answers, write integration level, UI/API choice, and both billing-model answers into the mapping doc (section 2). Don't re-ask later.
 
 ---
 
@@ -190,7 +216,7 @@ Wire the SDK client in the host's standard place for external clients — servic
 
 Skip this subsection if the user chose API-only in Phase 2.
 
-Before writing any UI code in Phase 6, ask each of the following separately and wait for an answer. Record what you learn in the mapping doc so later phases don't re-ask.
+Before writing any UI code in Phase 7, ask each of the following separately and wait for an answer. Record what you learn in the mapping doc so later phases don't re-ask.
 
 1. **Figma designs.** Ask: *"Do you have Figma designs for the AccessGrid screens — Send-to-wallet button, install-URL/QR display, lifecycle actions (suspend/resume/unlink/delete), and any Essential/Complete/Premium admin UIs (template / profile / landing-page management)?"*
    - If **yes**: ask the user to connect the Figma MCP server (the Skill tool's `figma:*` skills are unavailable without it) and paste the exact **frame URLs** for each screen. Frame-specific links carry the `node-id` query parameter the MCP needs to fetch the right node — a top-level file link is not enough. If the user isn't sure how, tell them: in Figma, right-click the frame → **Copy link to selection** → paste.
@@ -207,7 +233,60 @@ If the user does not have any of the three, default to matching the visual style
 
 ---
 
-## Phase 6 — Endpoints and lifecycle
+## Phase 6 — Billing integration
+
+Skip this phase **only if** both Step 2c answers were "no charge / bundled" — there's nothing to wire. Otherwise, read [references/billing.md](./references/billing.md) start-to-finish before continuing; it has the per-provider integration patterns and the canonical AG-event-to-billing-action mapping.
+
+### Step 6a — Billing provider
+
+Ask: "Which billing platform does your application use today?"
+
+- A. Stripe
+- B. Spreedly
+- C. Authorize.net
+- D. Chargify (Maxio Advanced Billing)
+- E. Adyen
+- F. Checkout.com
+- G. Something else (name it)
+- H. None yet — billing is manual / not in the codebase
+
+If **H**, stop. Building billing infrastructure from scratch is out of scope for an AG integration. Surface this to the user and recommend they pick a provider and integrate it the normal way before returning to this phase.
+
+If **G**, ask which SDK / API the host uses. The canonical event-to-action mapping in [references/billing.md](./references/billing.md) still applies; only the provider-specific code differs.
+
+### Step 6b — Billing tables
+
+Locate the host's billing tables using the same one-concept-per-question pattern as Phase 3. Confirm each separately:
+
+- **Billing customer** (often `customers`, `billing_accounts`, `accounts`, or coincident with the tenant)
+- **Subscription** (often `subscriptions`, `memberships`)
+- **Subscription item / line** (often `subscription_items`, `subscription_lines`)
+- **Invoice** (often `invoices`, `bills`)
+- **Invoice line / charge** (often `invoice_items`, `line_items`)
+- **Product / Price** (often `products`, `prices`, `plans`)
+- **Usage record** — only required when "monthly per active pass" was chosen
+
+If a concept genuinely doesn't exist because the host doesn't use that billing model (e.g. no `usage_records` because the host bills only annually), record "N/A" and skip the matching code path. Do not invent a parallel schema — see [references/billing.md](./references/billing.md) for when to add a table vs. call the provider's API directly.
+
+### Step 6c — Implement
+
+Implement the billing wire-up per the choices in Step 2c and the provider pattern in [references/billing.md](./references/billing.md). Key requirements:
+
+- **Trigger from AG webhooks, not local state writes.** The host's billing actions fire from the Phase 8 webhook receiver. Exception: at MVP, billing may fire on a successful `client.access_cards.provision(...)` response. Document the chosen trigger in the mapping doc.
+- **Use the provider's native idempotency mechanism on every API call.** Build keys deterministically from `{operation}_{credential_id}_{cycle_or_event_id}`.
+- **Persist the external billing ID** (`invoice_id`, `subscription_item_id`, `usage_record_id`, etc.) before the operation is considered complete.
+- **Two-phase write** when the billing API is external: insert host billing row as `status=pending`, call the provider, mark `status=succeeded` only on confirmation. A reconciler resolves `pending` rows on crash.
+- **Reconciliation job** runs at least daily, comparing host counts against provider state. Surface divergences in the host's normal error path.
+- **Use the host's existing billing client.** Do not introduce a new provider, a new schema, or a parallel charging path.
+- **Disclose billable events** in issuance UI when issuance incurs a charge.
+
+### Lock the choices in the mapping doc
+
+Record: billing provider, the seven billing-table mappings (with N/A where applicable), chosen trigger (webhook vs synchronous), and the location of the reconciliation job.
+
+---
+
+## Phase 7 — Endpoints and lifecycle
 
 Build a **vertical slice first.** Before broadening scope, get one credential all the way through:
 
@@ -244,7 +323,7 @@ Before calling `client.access_cards.provision(...)`, check if the host credentia
 
 ---
 
-## Phase 7 — Webhooks
+## Phase 8 — Webhooks
 
 Read [references/webhook-events.md](./references/webhook-events.md) for the full event catalog, recommended subscriptions per integration level, transport (CloudEvents 1.0), and receiver non-negotiables.
 
@@ -311,6 +390,17 @@ Subscribe `ag.account_balance.low` and `ag.webhook.cert_expiring` to your existi
 - Use the host's existing KMS / vault / encrypted credentials store.
 - `webhooks.bearer_token` (Essential+) and `credential_profile_keys.key_value` (Complete+) MUST be encrypted at rest in the database.
 
+### Billing
+
+Applies only if either Step 2c answer is non-bundled. See [references/billing.md](./references/billing.md) for the full pattern.
+
+- **Trigger billing actions from AG webhooks**, not local state writes. The only documented exception is synchronous MVP provisioning.
+- **Use the provider's native idempotency mechanism** on every billing API call. A retry must never double-charge.
+- **Persist the external billing ID** before considering the operation complete.
+- **No new billing provider** — wire AG events into the host's existing Stripe / Spreedly / Authorize.net / Chargify / Adyen / Checkout.com (or other) integration.
+- **Run a daily reconciliation job** comparing host counts (active passes, active templates) against provider state.
+- **Failed billing must not block lifecycle.** It surfaces in the host's normal alerting; the operator decides.
+
 ### UX
 
 - Use existing host-app UI patterns. No separate admin app for v1.
@@ -330,6 +420,7 @@ The integration is not done until **all** of these are true:
 - [ ] Required secrets are documented and loaded correctly.
 - [ ] Webhook receiver dedupes and acks per the non-negotiables.
 - [ ] Sensitive columns are verified encrypted at rest by inspecting raw DB values.
+- [ ] If applicable, billing is wired into the host's existing provider — no duplicate charges on webhook replay, external billing IDs persisted, reconciliation job in place.
 - [ ] Another engineer can identify where mapping, retries, and reconciliation live.
 - [ ] Per-level checklist (in the matching integration-level reference) is fully checked.
 
@@ -346,3 +437,6 @@ The integration is not done until **all** of these are true:
 - Bypassing webhook signature / bearer verification "just for dev."
 - Storing bearer tokens or credential profile keys unencrypted.
 - Letting `is_mobile_wallet_credential` placement be implicit — always ask.
+- Introducing a second billing provider when the host already has one.
+- Billing from optimistic local state — charges must follow AG-confirmed events.
+- Skipping idempotency keys on billing API calls "because retries are rare."

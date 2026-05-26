@@ -1,6 +1,6 @@
 # Discovery and Planning
 
-Companion to [../SKILL.md](../SKILL.md). Use during Phase 1 (read the host repo) and Phase 3 (database discovery). This file is the *checklist* of what to look for; write findings into the mapping doc the SKILL.md tells you to maintain in the host repo.
+Companion to [../SKILL.md](../SKILL.md). Use during Phase 1 (read the host repo), Phase 3 (database discovery), and Phase 6 (billing integration). This file is the *checklist* of what to look for; write findings into the mapping doc the SKILL.md tells you to maintain in the host repo.
 
 ## Repo inspection checklist
 
@@ -10,6 +10,7 @@ Find these in the host repo before writing any AG-specific code:
 - Credential / badge / card model
 - Tenant / site / building / organization model (if multi-tenant)
 - Where external-provider clients live (the `Stripe::Client` / `Twilio` / `SendGrid` pattern)
+- **Billing provider client and tables** (Stripe / Spreedly / Authorize.net / Chargify / Adyen / Checkout.com etc.) — see [billing.md](./billing.md)
 - Where secrets and env vars are defined (and how prod/dev split works)
 - Where queues, jobs, workers, or cron processes live
 - Where webhook controllers / callback handlers live
@@ -27,6 +28,8 @@ rg -n "credential|badge|cardholder|site code|facility code|card number"
 rg -n "twilio|sendgrid|postmark|stripe|external api|client"
 rg -n "tenant|site|organization|building|campus"
 rg -n "encrypts|encrypted|cipher|kms|secrets_manager"
+rg -n "stripe|spreedly|authorize\\.net|chargify|adyen|checkout\\.com|maxio|recurly|paddle"
+rg -n "subscription|invoice|usage_record|line_item|billing"
 ```
 
 ## Required inputs from the user
@@ -40,6 +43,16 @@ Collect or confirm before Phase 5 (secrets and client wiring):
 - For MVP: pre-created template IDs (iOS / Android / Samsung)
 - For MVP: webhook bearer (shown once at webhook creation in AG console)
 - Wallet art assets, or explicit approval to use placeholders during dev
+
+Collect or confirm before Phase 6 (billing integration) — skip if both Step 2c answers were "no charge / bundled":
+
+- Card-template billing model (monthly / annually / none) — Step 2c Question A
+- Access-pass billing model (bundled / monthly / annually / per-issuance) — Step 2c Question B
+- Billing provider (Stripe / Spreedly / Authorize.net / Chargify / Adyen / Checkout.com / other)
+- Billing-table mappings: customer, subscription, subscription item, invoice, invoice line, product/price, usage record (any may be N/A)
+- Whether suspended passes continue to be billed (host policy)
+- Refund / pro-ration policy on `unlink` and `delete`
+- See [billing.md](./billing.md) for the full procedure
 
 ## AccessGrid terms to preserve
 
@@ -64,3 +77,4 @@ Don't start implementation until these are explicit:
 - Which place exposes terminal failures to operators
 - Which integration level the user committed to (Phase 2 output)
 - Which UI surface the user committed to (Phase 2 output)
+- Which billing model the user committed to (Phase 2 Step 2c output) — and, if non-bundled, which provider and table mappings (Phase 6 output)
